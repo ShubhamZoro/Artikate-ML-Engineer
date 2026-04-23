@@ -1,0 +1,20 @@
+# Core RAG dependencies
+pymupdf==1.24.5               # PDF parsing (fitz) — fastest, preserves layout
+
+# Embeddings + LLM (single API, fully OpenAI-based)
+openai==1.57.0                 # text-embedding-3-small + GPT-4o-mini (httpx>=0.28 compatible)
+httpx>=0.27.0,<0.29.0          # Pin to avoid openai/httpx proxies conflict
+python-dotenv==1.0.1
+
+# Vector store
+chromadb==0.5.5                # Persistent vector store with cosine search
+
+# Hybrid retrieval — BM25
+rank-bm25==0.2.2               # BM25 keyword retrieval (in-memory)
+
+# Evaluation & utilities
+numpy==1.26.4
+tqdm==4.66.4
+rich==13.7.1                   # Pretty CLI output
+
+# CLI uses built-in argparse — no extra framework needed

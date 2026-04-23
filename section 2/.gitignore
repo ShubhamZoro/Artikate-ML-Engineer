@@ -1,0 +1,49 @@
+# ── Secrets & environment ─────────────────────────────────────────────────────
+.env
+*.env.*
+
+# ── Virtual environment ───────────────────────────────────────────────────────
+venva/
+venv/
+.venv/
+env/
+
+# ── ChromaDB vector store (regenerate with ingest.py) ────────────────────────
+chroma_db/
+
+# ── Source PDFs (large binaries; keep out of version control) ────────────────
+my_pdfs/
+*.pdf
+
+# ── Evaluation outputs ────────────────────────────────────────────────────────
+evaluation/report.json
+
+# ── Python cache & build artefacts ───────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Testing & coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Jupyter notebooks checkpoints ────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── OS noise ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editor / IDE ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace

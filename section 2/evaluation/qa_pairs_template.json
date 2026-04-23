@@ -1,0 +1,132 @@
+[
+  {
+    "id": "q001",
+    "question": "What is the security deposit amount required in the contract document?",
+    "expected_answer": "Rs. 5,00,000 (Five Lakhs)",
+    "relevant_document": "Contract document.pdf",
+    "relevant_page": 2,
+    "relevant_chunk_keywords": [
+      "security deposit",
+      "5,00,000",
+      "five lakhs",
+      "performance guarantee"
+    ]
+  },
+  {
+    "id": "q002",
+    "question": "What is the duration of the contract period in the contract document?",
+    "expected_answer": "1 year, extendable on mutual consent",
+    "relevant_document": "Contract document.pdf",
+    "relevant_page": 10,
+    "relevant_chunk_keywords": [
+      "contract period",
+      "1 year",
+      "extendable",
+      "mutual consent"
+    ]
+  },
+  {
+    "id": "q003",
+    "question": "What is the notice period required for termination in the contract document?",
+    "expected_answer": "30 days written notice",
+    "relevant_document": "Contract document.pdf",
+    "relevant_page": 17,
+    "relevant_chunk_keywords": [
+      "termination",
+      "30 days",
+      "written notice",
+      "vacation of premises"
+    ]
+  },
+  {
+    "id": "q004",
+    "question": "Which courts have jurisdiction over disputes in the contract document?",
+    "expected_answer": "Courts in Kanpur",
+    "relevant_document": "Contract document.pdf",
+    "relevant_page": 3,
+    "relevant_chunk_keywords": [
+      "jurisdiction",
+      "Kanpur",
+      "courts",
+      "disputes"
+    ]
+  },
+  {
+    "id": "q005",
+    "question": "What is the maximum total payment condition mentioned in the shuttle service agreement?",
+    "expected_answer": "Total payment shall not exceed the amount specified in the fee schedule",
+    "relevant_document": "SampleContract-Shuttle.pdf",
+    "relevant_page": 1,
+    "relevant_chunk_keywords": [
+      "total payment",
+      "not to exceed",
+      "fee schedule",
+      "compensation"
+    ]
+  },
+  {
+    "id": "q006",
+    "question": "What is the notice period for termination by the commission in the shuttle service agreement?",
+    "expected_answer": "30 days written notice",
+    "relevant_document": "SampleContract-Shuttle.pdf",
+    "relevant_page": 2,
+    "relevant_chunk_keywords": [
+      "termination",
+      "30 days",
+      "written notice",
+      "commission"
+    ]
+  },
+  {
+    "id": "q007",
+    "question": "Within how many days must invoices be submitted after work in the shuttle service agreement?",
+    "expected_answer": "Within 45 calendar days",
+    "relevant_document": "SampleContract-Shuttle.pdf",
+    "relevant_page": 2,
+    "relevant_chunk_keywords": [
+      "invoice",
+      "45 days",
+      "billing",
+      "submission"
+    ]
+  },
+  {
+    "id": "q008",
+    "question": "What is the fundamental principle stated in Article 1 of the Universal Declaration of Human Rights?",
+    "expected_answer": "All human beings are born free and equal in dignity and rights",
+    "relevant_document": "universal_declaration_of_human_rights.pdf",
+    "relevant_page": 1,
+    "relevant_chunk_keywords": [
+      "Article 1",
+      "free and equal",
+      "dignity",
+      "rights"
+    ]
+  },
+  {
+    "id": "q009",
+    "question": "What right is guaranteed under Article 3 of the Universal Declaration of Human Rights?",
+    "expected_answer": "Right to life, liberty and security of person",
+    "relevant_document": "universal_declaration_of_human_rights.pdf",
+    "relevant_page": 2,
+    "relevant_chunk_keywords": [
+      "Article 3",
+      "life",
+      "liberty",
+      "security"
+    ]
+  },
+  {
+    "id": "q010",
+    "question": "What does Article 5 of the Universal Declaration of Human Rights prohibit?",
+    "expected_answer": "Torture and cruel, inhuman or degrading treatment or punishment",
+    "relevant_document": "universal_declaration_of_human_rights.pdf",
+    "relevant_page": 2,
+    "relevant_chunk_keywords": [
+      "Article 5",
+      "torture",
+      "inhuman treatment",
+      "punishment"
+    ]
+  }
+]
