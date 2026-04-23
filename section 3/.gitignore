@@ -1,0 +1,93 @@
+# ─────────────────────────────────────────────
+# Python
+# ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ─────────────────────────────────────────────
+# Virtual Environments
+# ─────────────────────────────────────────────
+venva/
+venv/
+.venv/
+env/
+ENV/
+
+# ─────────────────────────────────────────────
+# Jupyter / IPython
+# ─────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ─────────────────────────────────────────────
+# Model Artifacts & Training Outputs
+# ─────────────────────────────────────────────
+# Ignore heavy model weights and HF checkpoints inside results/
+results/best_model/
+results/checkpoint-*/
+
+# Ignore auto-generated CSVs (test split saved by train.py)
+results/test_set.csv
+
+# --- KEEP the following in results/ (tracked by git) ---
+# results/*.png   -> confusion matrices & reports
+# results/*.xlsx  -> prediction spreadsheets
+!results/
+!results/*.png
+!results/*.xlsx
+
+# ─────────────────────────────────────────────
+# Large Data Files
+# ─────────────────────────────────────────────
+# *.csv files are intentionally tracked (test_data.csv, eval_data.csv, AI_tickets.csv)
+*.tsv
+*.parquet
+*.jsonl
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.pt
+*.bin
+*.safetensors
+
+# ─────────────────────────────────────────────
+# HuggingFace Cache
+# ─────────────────────────────────────────────
+.cache/
+huggingface/
+
+# ─────────────────────────────────────────────
+# Environment Variables / Secrets
+# ─────────────────────────────────────────────
+.env
+.env.*
+*.key
+secrets.json
+
+# ─────────────────────────────────────────────
+# OS & Editor Artifacts
+# ─────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ─────────────────────────────────────────────
+# Logs & Temp Files
+# ─────────────────────────────────────────────
+*.log
+logs/
+tmp/
+temp/
