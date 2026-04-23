@@ -22,7 +22,7 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 
 from .embeddings import OpenAIEmbedder
-from .vectorstore import LegalVectorStore, VectorSearchResult
+from .vectorstore import LegalVectorStore, VectorSearchResult, ParentChunkStore
 
 
 # ---------------------------------------------------------------------------
@@ -142,11 +142,13 @@ class HybridRetriever:
         self,
         vector_store: LegalVectorStore,
         embedder: OpenAIEmbedder,
+        parent_store: Optional[ParentChunkStore] = None,
         candidate_k: int = 30,
         final_k: int = 5,
     ) -> None:
         self._vector_store = vector_store
         self._embedder = embedder
+        self._parent_store = parent_store
         self._candidate_k = candidate_k
         self._final_k = final_k
 
@@ -265,29 +267,36 @@ class HybridRetriever:
         # Fill up to final_k: diverse first, then overflow
         top = (diverse + overflow)[: self._final_k]
 
-        # ── Stage 5: Assemble final results ─────────────────────────
+        # ── Stage 5: Assemble final results (expand child → parent) ─
         final_chunks: list[RetrievedChunk] = []
         for rank, (cid, rrf_score) in enumerate(top, start=1):
             if cid in self._chunk_cache:
-                text, meta = self._chunk_cache[cid]
+                child_text, meta = self._chunk_cache[cid]
             else:
-                # Fallback: find in dense results
-                text, meta = "", {}
+                child_text, meta = "", {}
                 for r in dense_results:
                     if r.chunk_id == cid:
-                        text = r.text
+                        child_text = r.text
                         break
+
+            # Expand to parent chunk if available
+            parent_chunk_id = meta.get("parent_chunk_id", "")
+            if self._parent_store and parent_chunk_id:
+                parent = self._parent_store.get(parent_chunk_id)
+                generation_text = parent["text"] if parent else child_text
+            else:
+                generation_text = child_text
 
             final_chunks.append(RetrievedChunk(
                 chunk_id=cid,
                 document=meta.get("document", ""),
                 page_number=int(meta.get("page_number", 0)),
                 section_title=meta.get("section_title", ""),
-                text=text,
+                text=generation_text,   # parent text for LLM
                 dense_score=float(dense_scores.get(cid, 0.0)),
                 bm25_score=float(bm25_scores.get(cid, 0.0)),
                 rrf_score=float(rrf_score),
-                rerank_score=float(rrf_score),   # kept for API compatibility
+                rerank_score=float(rrf_score),
                 final_rank=rank,
             ))
 

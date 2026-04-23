@@ -1,13 +1,13 @@
 """
 rag_pipeline.py — Main RAGPipeline class (public interface).
 
-Orchestrates: ingestion → chunking → embedding → vector store →
-              hybrid retrieval → generation → hallucination check.
+Orchestrates: ingestion → hierarchical chunking → embedding → vector store →
+              hybrid retrieval (child→parent expansion) → generation → hallucination check.
 
 Usage:
     from pipeline import RAGPipeline
 
-    pipeline = RAGPipeline.from_documents("./sample_docs")
+    pipeline = RAGPipeline.from_documents("./my_pdfs")
 
     result = pipeline.query("What is the notice period in the NDA with Vendor X?")
     # result: {
@@ -24,9 +24,9 @@ from pathlib import Path
 from typing import Optional
 
 from .ingestion import load_directory, IngestedCorpus
-from .chunking import chunk_corpus, DocumentChunk
+from .chunking import chunk_corpus, DocumentChunk, ParentChunk
 from .embeddings import OpenAIEmbedder
-from .vectorstore import LegalVectorStore
+from .vectorstore import LegalVectorStore, ParentChunkStore
 from .retrieval import HybridRetriever, RetrievedChunk
 from .generation import LLMGenerator
 from .hallucination import (
@@ -84,24 +84,19 @@ class RAGPipeline:
     Production-grade RAG pipeline for legal document Q&A.
 
     Components:
-      - BGE-large-en-v1.5 embeddings
-      - ChromaDB persistent vector store
-      - Hybrid BM25 + dense retrieval with cross-encoder re-ranking
+      - OpenAI text-embedding-3-small embeddings
+      - ChromaDB persistent vector store (child chunks for retrieval)
+      - ParentChunkStore JSON sidecar (parent chunks for generation)
+      - Hybrid BM25 + dense retrieval with page-diversity deduplication
+      - Child → Parent chunk expansion (small-to-big retrieval)
       - OpenAI GPT-4o-mini generation with strict grounding prompt
       - Source grounding check + confidence scoring + answer refusal
-
-    Args:
-        vector_store:   Populated LegalVectorStore.
-        embedder:       BGEEmbedder instance.
-        retriever:      HybridRetriever instance.
-        generator:      LLMGenerator instance.
-        top_k:          Final number of chunks to use for generation.
     """
 
     def __init__(
         self,
         vector_store: LegalVectorStore,
-        embedder: BGEEmbedder,
+        embedder: OpenAIEmbedder,
         retriever: HybridRetriever,
         generator: LLMGenerator,
         top_k: int = 3,
@@ -132,7 +127,7 @@ class RAGPipeline:
 
         Args:
             docs_dir:        Directory containing .pdf files.
-            persist_dir:     Where ChromaDB persists data.
+            persist_dir:     Where ChromaDB and parent store persist data.
             collection_name: ChromaDB collection name.
             openai_api_key:  OpenAI API key (falls back to OPENAI_API_KEY env var).
             llm_model:       OpenAI model name.
@@ -145,6 +140,9 @@ class RAGPipeline:
         print("\n" + "="*60)
         print("  RAG Pipeline Initialisation")
         print("="*60)
+
+        persist_path = Path(persist_dir)
+        parent_store_path = persist_path / "parent_chunks.json"
 
         # ── 1. Embedder ──────────────────────────────────────────────
         embedder = OpenAIEmbedder(
@@ -159,36 +157,47 @@ class RAGPipeline:
             reset=reset_store,
         )
 
-        # ── 3. Ingest + chunk + embed (only if store is empty / reset) ──
+        # ── 3. Parent store ──────────────────────────────────────────
+        parent_store = ParentChunkStore(path=parent_store_path)
+        if reset_store:
+            parent_store.clear()
+
+        # ── 4. Ingest + chunk + embed (only if store is empty / reset) ──
         if reset_store or vector_store.count() == 0:
             print(f"\n[Ingestion] Loading PDFs from: {docs_dir}")
             corpus: IngestedCorpus = load_directory(docs_dir)
             print(f"  Total pages loaded: {len(corpus)}")
 
-            print("\n[Chunking] Applying legal-aware hierarchical chunking …")
-            chunks: list[DocumentChunk] = chunk_corpus(corpus)
-            print(f"  Total chunks created: {len(chunks)}")
+            print("\n[Chunking] Applying hierarchical parent-child chunking …")
+            parents, children = chunk_corpus(corpus)
+            print(f"  Parent chunks : {len(parents)} (512t, used for generation)")
+            print(f"  Child chunks  : {len(children)} (256t, indexed for retrieval)")
 
-            print("\n[Embedding] Encoding chunks with OpenAI text-embedding-3-small …")
-            embeddings = embedder.embed_chunks(chunks)
+            print("\n[Embedding] Encoding child chunks with OpenAI text-embedding-3-small …")
+            embeddings = embedder.embed_chunks(children)
             print(f"  Embedding shape: {embeddings.shape}")
 
-            print("\n[Indexing] Storing in ChromaDB …")
-            vector_store.add_chunks(chunks, embeddings)
+            print("\n[Indexing] Storing child chunks in ChromaDB …")
+            vector_store.add_chunks(children, embeddings)
             print(f"  Total vectors stored: {vector_store.count()}")
+
+            print("\n[Parent Store] Saving parent chunks to disk …")
+            parent_store.add_parents(parents)
         else:
             print(f"\n[Skipping ingestion] Using existing index "
-                  f"({vector_store.count()} vectors)")
+                  f"({vector_store.count()} child vectors, "
+                  f"{len(parent_store)} parent chunks)")
 
-        # ── 4. Retriever ─────────────────────────────────────────────
+        # ── 5. Retriever ─────────────────────────────────────────────
         print("\n[Retriever] Building BM25 index + initialising hybrid retriever …")
         retriever = HybridRetriever(
             vector_store=vector_store,
             embedder=embedder,
-            final_k=top_k * 2,   # retrieve 2× top_k, then cut after grounding
+            parent_store=parent_store,
+            final_k=top_k * 2,
         )
 
-        # ── 5. Generator ─────────────────────────────────────────────
+        # ── 6. Generator ─────────────────────────────────────────────
         generator = LLMGenerator(
             model=llm_model,
             api_key=openai_api_key or os.getenv("OPENAI_API_KEY"),
@@ -213,10 +222,13 @@ class RAGPipeline:
         top_k: int = 3,
     ) -> "RAGPipeline":
         """
-        Load a pre-existing pipeline from a persisted ChromaDB store.
+        Load a pre-existing pipeline from a persisted store.
         No ingestion is performed — the index must already exist.
         """
-        print("[Pipeline] Loading from existing ChromaDB store …")
+        print("[Pipeline] Loading from existing store …")
+        persist_path = Path(persist_dir)
+        parent_store_path = persist_path / "parent_chunks.json"
+
         embedder = OpenAIEmbedder(
             api_key=openai_api_key or os.getenv("OPENAI_API_KEY"),
             show_progress=False,
@@ -231,16 +243,19 @@ class RAGPipeline:
                 f"No vectors found in ChromaDB at '{persist_dir}'. "
                 "Run ingest.py first or use RAGPipeline.from_documents()."
             )
+        parent_store = ParentChunkStore(path=parent_store_path)
         retriever = HybridRetriever(
             vector_store=vector_store,
             embedder=embedder,
+            parent_store=parent_store,
             final_k=top_k * 2,
         )
         generator = LLMGenerator(
             model=llm_model,
             api_key=openai_api_key or os.getenv("OPENAI_API_KEY"),
         )
-        print(f"[Pipeline] ✓ Loaded ({vector_store.count()} vectors)\n")
+        print(f"[Pipeline] ✓ Loaded ({vector_store.count()} child vectors, "
+              f"{len(parent_store)} parent chunks)\n")
         return cls(
             vector_store=vector_store,
             embedder=embedder,
@@ -261,11 +276,6 @@ class RAGPipeline:
         """
         Answer a question using the RAG pipeline.
 
-        Args:
-            question:        The user's natural-language question.
-            metadata_filter: Optional ChromaDB filter to restrict search scope,
-                             e.g. {"document": {"$eq": "nda_vendor_x.pdf"}}.
-
         Returns:
             dict with keys:
               - answer     (str)   : the generated answer
@@ -275,7 +285,7 @@ class RAGPipeline:
         if not question or not question.strip():
             raise ValueError("Question must be a non-empty string.")
 
-        # ── Stage 1: Retrieve ────────────────────────────────────────
+        # ── Stage 1: Retrieve (child→parent expanded) ────────────────
         retrieved: list[RetrievedChunk] = self._retriever.retrieve(
             query=question,
             metadata_filter=metadata_filter,
@@ -289,7 +299,6 @@ class RAGPipeline:
                 refused=True,
             ).to_dict()
 
-        # Use only top_k for generation
         generation_chunks = retrieved[: self._top_k]
 
         # ── Stage 2: Generate ────────────────────────────────────────
@@ -305,16 +314,14 @@ class RAGPipeline:
         # ── Stage 4: Assemble result ─────────────────────────────────
         sources = [chunk.to_source_dict() for chunk in generation_chunks]
 
-        result = QueryResult(
+        return QueryResult(
             answer=answer_text,
             sources=sources,
             confidence=confidence,
             refused=should_refuse(confidence),
             grounding_ratio=grounding.grounding_ratio,
             retrieved_chunks=retrieved,
-        )
-
-        return result.to_dict()
+        ).to_dict()
 
     # ------------------------------------------------------------------
     # Utility
@@ -325,5 +332,5 @@ class RAGPipeline:
         return self._vector_store.list_documents()
 
     def index_size(self) -> int:
-        """Return total number of indexed chunks."""
+        """Return total number of indexed child chunks."""
         return self._vector_store.count()

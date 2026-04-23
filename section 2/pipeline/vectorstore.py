@@ -1,8 +1,11 @@
 """
-vectorstore.py — ChromaDB persistent vector store wrapper.
+vectorstore.py — ChromaDB persistent vector store wrapper + ParentChunkStore.
 
-Stores chunk embeddings + metadata (document, page, section, chunk_id).
-Supports cosine similarity search with optional metadata filtering.
+Stores child chunk embeddings + metadata (document, page, section, chunk_id)
+in ChromaDB for retrieval.
+
+Stores parent chunk texts in a JSON sidecar file so the retriever can
+expand each retrieved child chunk to its richer parent context.
 """
 
 from __future__ import annotations
@@ -15,7 +18,58 @@ import numpy as np
 import chromadb
 from chromadb.config import Settings
 
-from .chunking import DocumentChunk
+from .chunking import DocumentChunk, ParentChunk
+
+
+# ---------------------------------------------------------------------------
+# Parent chunk store (JSON sidecar)
+# ---------------------------------------------------------------------------
+
+class ParentChunkStore:
+    """
+    Stores parent chunk texts on disk (JSON) so retrieval can expand
+    child hits to their full parent context.
+
+    Format: { parent_chunk_id: { "text": str, "document": str,
+                                  "page_number": int, "section_title": str } }
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+        self._store: dict[str, dict] = {}
+        if self._path.exists():
+            with open(self._path, encoding="utf-8") as f:
+                self._store = json.load(f)
+            print(f"Parent store loaded: {len(self._store)} parents from {self._path.name}")
+
+    def add_parents(self, parents: list[ParentChunk]) -> None:
+        """Add parent chunks to the store and persist to disk."""
+        for p in parents:
+            self._store[p.chunk_id] = {
+                "text": p.text,
+                "document": p.document,
+                "page_number": p.page_number,
+                "section_title": p.section_title,
+            }
+        self._save()
+        print(f"Parent store: {len(self._store)} parents saved to {self._path.name}")
+
+    def get(self, parent_chunk_id: str) -> Optional[dict]:
+        """Return parent chunk dict or None if not found."""
+        return self._store.get(parent_chunk_id)
+
+    def clear(self) -> None:
+        self._store = {}
+        self._save()
+
+    def _save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._path, "w", encoding="utf-8") as f:
+            json.dump(self._store, f)
+
+    def __len__(self) -> int:
+        return len(self._store)
+
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +188,7 @@ class LegalVectorStore:
                 "page_number": c.page_number,
                 "section_title": c.section_title,
                 "chunk_index": c.chunk_index,
+                "parent_chunk_id": getattr(c, "parent_chunk_id", ""),
                 "source": c.metadata.get("source", ""),
             }
             for c in chunks
