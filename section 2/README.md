@@ -1,6 +1,6 @@
 # Legal Document RAG Pipeline
 
-A production-grade Retrieval-Augmented Generation (RAG) system for legal document Q&A, with hybrid retrieval, cross-encoder re-ranking, hallucination mitigation, and a measurable evaluation harness.
+A production-grade Retrieval-Augmented Generation (RAG) system for legal document Q&A, with hybrid retrieval, parent-chunk expansion, hallucination mitigation, and a measurable evaluation harness.
 
 ---
 
@@ -15,9 +15,9 @@ section 2/
 ├── pipeline/
 │   ├── ingestion.py                  # PDF loading (PyMuPDF)
 │   ├── chunking.py                   # Legal-aware hierarchical chunking
-│   ├── embeddings.py                 # BGE-large-en-v1.5 wrapper
-│   ├── vectorstore.py                # ChromaDB persistent store
-│   ├── retrieval.py                  # Hybrid BM25 + dense + cross-encoder
+│   ├── embeddings.py                 # OpenAI text-embedding-3-small wrapper
+│   ├── vectorstore.py                # ChromaDB — two collections (children + parents)
+│   ├── retrieval.py                  # Hybrid BM25 + dense + RRF + parent expansion
 │   ├── generation.py                 # OpenAI GPT generation
 │   ├── hallucination.py              # Grounding check + confidence score
 │   └── rag_pipeline.py              # Main RAGPipeline class
@@ -31,6 +31,19 @@ section 2/
 ├── query.py                          # CLI: run a query
 └── evaluate.py                       # CLI: run evaluation harness
 ```
+
+---
+
+## How the vector store works
+
+The pipeline maintains **two ChromaDB collections** inside the same `chroma_db` directory:
+
+| Collection | Contents | Used for |
+|---|---|---|
+| `legal_rag_children` | Child chunks (256 tokens) + embeddings | Vector similarity search at query time |
+| `legal_rag_parents` | Parent chunks (512 tokens), no vectors | Fetched by ID after retrieval to give the LLM richer context |
+
+At query time, the retriever finds the best child chunks (small = precise hits), then issues a **single batched `.get()` call** to fetch their parent texts (large = rich LLM context). This is O(1) per query regardless of corpus size — no JSON file, no RAM pre-load.
 
 ---
 
@@ -64,6 +77,8 @@ cp .env.example .env
 python ingest.py --docs_dir ./my_pdfs
 ```
 
+This builds both ChromaDB collections. On subsequent runs the index is reused automatically — re-ingestion is skipped unless you pass `--reset`.
+
 ### 5. Query the pipeline
 
 ```bash
@@ -79,7 +94,7 @@ result = pipeline.query("What is the notice period in the NDA with Vendor X?")
 #     {
 #       'document': str,     # filename
 #       'page': int,         # page number
-#       'chunk': str,        # retrieved text chunk
+#       'chunk': str,        # retrieved text chunk (parent, 512t)
 #     }
 #   ],
 #   'confidence': float,     # confidence score (0–1)
@@ -131,14 +146,14 @@ The evaluation harness marks a retrieval as a **hit** if:
 ```python
 from pipeline import RAGPipeline
 
-# Build from documents (first run)
+# Build from documents (first run — ingests PDFs into both ChromaDB collections)
 pipeline = RAGPipeline.from_documents(
     docs_dir="./my_pdfs",
     persist_dir="./chroma_db",
     reset_store=False,          # True to re-index from scratch
 )
 
-# Load existing index (subsequent runs — faster)
+# Load existing index (subsequent runs — faster, no re-embedding)
 pipeline = RAGPipeline.load(persist_dir="./chroma_db")
 
 # Query
@@ -156,20 +171,20 @@ result = pipeline.query(
 
 # Utility
 pipeline.list_documents()   # ['nda_vendor_x.pdf', 'service_agreement.pdf', ...]
-pipeline.index_size()       # 1842 (total indexed chunks)
+pipeline.index_size()       # 1842 (total indexed child chunks)
 ```
 
 ---
 
 ## Re-ingestion (adding new documents)
 
-To add new PDFs without wiping the existing index, simply run:
+To add new PDFs without wiping the existing index:
 
 ```bash
 python ingest.py --docs_dir ./new_pdfs
 ```
 
-ChromaDB will skip already-indexed chunks (by chunk_id). To force a full re-index:
+ChromaDB skips already-indexed chunks (by chunk ID). To force a full re-index of both collections:
 
 ```bash
 python ingest.py --docs_dir ./my_pdfs --reset
@@ -183,10 +198,13 @@ python ingest.py --docs_dir ./my_pdfs --reset
 |---|---|---|
 | PDF parsing | PyMuPDF | Fastest, preserves text layout |
 | Chunking | Legal-aware hierarchical | Respects clause boundaries |
-| Embedding | `BAAI/bge-large-en-v1.5` | Best retrieval MTEB, runs locally |
-| Vector store | ChromaDB | Persistent, metadata-filterable |
-| Retrieval | Hybrid BM25 + dense + cross-encoder | Exact-term + semantic + precision |
+| Embedding | `text-embedding-3-small` | Same API key, 1536-dim, cost-efficient |
+| Vector store (children) | ChromaDB `legal_rag_children` | Cosine vector search, persistent |
+| Parent store (parents) | ChromaDB `legal_rag_parents` | ID-based fetch, no RAM pre-load |
+| Retrieval | Hybrid BM25 + dense + RRF | Exact-term + semantic precision |
+| Parent expansion | Single batched `.get()` | One round-trip per query, O(1) |
 | Generation | OpenAI GPT-4o-mini | Cost-efficient, instruction-following |
 | Hallucination | Source grounding + confidence | Deterministic, model-agnostic |
 
-See **DESIGN.md** for full trade-off reasoning.
+
+---

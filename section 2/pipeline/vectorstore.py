@@ -1,16 +1,17 @@
 """
-vectorstore.py — ChromaDB persistent vector store wrapper + ParentChunkStore.
+vectorstore.py — ChromaDB persistent vector store wrapper.
 
-Stores child chunk embeddings + metadata (document, page, section, chunk_id)
-in ChromaDB for retrieval.
+Two collections:
+  legal_rag_children  — child chunk embeddings (256t) used for retrieval
+  legal_rag_parents   — parent chunk texts (512t) used for generation, fetched by ID
 
-Stores parent chunk texts in a JSON sidecar file so the retriever can
-expand each retrieved child chunk to its richer parent context.
+Eliminates the JSON sidecar entirely. Parent chunks are stored in ChromaDB
+and fetched on demand via .get(ids=[...]) — O(1) key-value lookup, no RAM
+pre-load, no disk serialisation outside ChromaDB's own storage.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Optional
 
@@ -19,57 +20,6 @@ import chromadb
 from chromadb.config import Settings
 
 from .chunking import DocumentChunk, ParentChunk
-
-
-# ---------------------------------------------------------------------------
-# Parent chunk store (JSON sidecar)
-# ---------------------------------------------------------------------------
-
-class ParentChunkStore:
-    """
-    Stores parent chunk texts on disk (JSON) so retrieval can expand
-    child hits to their full parent context.
-
-    Format: { parent_chunk_id: { "text": str, "document": str,
-                                  "page_number": int, "section_title": str } }
-    """
-
-    def __init__(self, path: str | Path) -> None:
-        self._path = Path(path)
-        self._store: dict[str, dict] = {}
-        if self._path.exists():
-            with open(self._path, encoding="utf-8") as f:
-                self._store = json.load(f)
-            print(f"Parent store loaded: {len(self._store)} parents from {self._path.name}")
-
-    def add_parents(self, parents: list[ParentChunk]) -> None:
-        """Add parent chunks to the store and persist to disk."""
-        for p in parents:
-            self._store[p.chunk_id] = {
-                "text": p.text,
-                "document": p.document,
-                "page_number": p.page_number,
-                "section_title": p.section_title,
-            }
-        self._save()
-        print(f"Parent store: {len(self._store)} parents saved to {self._path.name}")
-
-    def get(self, parent_chunk_id: str) -> Optional[dict]:
-        """Return parent chunk dict or None if not found."""
-        return self._store.get(parent_chunk_id)
-
-    def clear(self) -> None:
-        self._store = {}
-        self._save()
-
-    def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._path, "w", encoding="utf-8") as f:
-            json.dump(self._store, f)
-
-    def __len__(self) -> int:
-        return len(self._store)
-
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +46,7 @@ class VectorSearchResult:
         self.page_number = page_number
         self.section_title = section_title
         self.text = text
-        self.score = score           # cosine similarity (0–1, higher = better)
+        self.score = score
         self.chunk_index = chunk_index
 
     def to_dict(self) -> dict:
@@ -111,55 +61,65 @@ class VectorSearchResult:
 
 
 # ---------------------------------------------------------------------------
-# ChromaDB wrapper
+# ChromaDB wrapper — two collections
 # ---------------------------------------------------------------------------
 
 class LegalVectorStore:
     """
-    Persistent ChromaDB-backed vector store for legal document chunks.
-
-    The collection uses cosine distance (1 - cosine_similarity).
-    Embeddings must be L2-normalised before insertion (BGEEmbedder
-    already handles this via normalize_embeddings=True).
+    Persistent ChromaDB-backed store with two collections:
+      - <name>_children : child chunk embeddings for retrieval
+      - <name>_parents  : parent chunk texts for generation (fetched by ID)
 
     Args:
         persist_directory: Path where ChromaDB stores its data.
-        collection_name:   Name of the Chroma collection.
-        reset:             If True, wipe the collection before use.
+        collection_name:   Base name; suffixes _children / _parents are appended.
+        reset:             If True, wipe both collections before use.
     """
-
-    COLLECTION_NAME_DEFAULT = "legal_rag"
 
     def __init__(
         self,
         persist_directory: str | Path = "./chroma_db",
-        collection_name: str = COLLECTION_NAME_DEFAULT,
+        collection_name: str = "legal_rag",
         reset: bool = False,
     ) -> None:
         self._persist_dir = Path(persist_directory)
         self._persist_dir.mkdir(parents=True, exist_ok=True)
-        self._collection_name = collection_name
+        self._base_name = collection_name
 
         self._client = chromadb.PersistentClient(
             path=str(self._persist_dir),
             settings=Settings(anonymized_telemetry=False),
         )
 
-        if reset:
-            try:
-                self._client.delete_collection(collection_name)
-            except Exception:
-                pass
+        child_name = f"{collection_name}_children"
+        parent_name = f"{collection_name}_parents"
 
-        self._collection = self._client.get_or_create_collection(
-            name=collection_name,
+        if reset:
+            for name in (child_name, parent_name):
+                try:
+                    self._client.delete_collection(name)
+                except Exception:
+                    pass
+
+        self._children = self._client.get_or_create_collection(
+            name=child_name,
             metadata={"hnsw:space": "cosine"},
         )
-        print(f"ChromaDB collection '{collection_name}' ready "
-              f"({self._collection.count()} vectors stored)")
+        # Parents collection: no embeddings, text + metadata only.
+        # We store a dummy embedding of dim=1 just to satisfy ChromaDB's
+        # schema — we never query by vector on this collection.
+        self._parents = self._client.get_or_create_collection(
+            name=parent_name,
+        )
+
+        print(
+            f"ChromaDB ready — "
+            f"{self._children.count()} child vectors, "
+            f"{self._parents.count()} parent chunks"
+        )
 
     # ------------------------------------------------------------------
-    # Indexing
+    # Indexing — children
     # ------------------------------------------------------------------
 
     def add_chunks(
@@ -169,16 +129,9 @@ class LegalVectorStore:
         batch_size: int = 500,
     ) -> None:
         """
-        Add chunks + precomputed embeddings to the collection.
-
-        Args:
-            chunks:     List of DocumentChunk objects.
-            embeddings: Float32 array (N, dim) aligned with chunks.
-            batch_size: Chroma insert batch size.
+        Add child chunks + precomputed embeddings to the children collection.
         """
-        assert len(chunks) == len(embeddings), (
-            f"Chunk count {len(chunks)} != embedding count {len(embeddings)}"
-        )
+        assert len(chunks) == len(embeddings)
 
         ids = [c.chunk_id for c in chunks]
         texts = [c.text for c in chunks]
@@ -188,26 +141,68 @@ class LegalVectorStore:
                 "page_number": c.page_number,
                 "section_title": c.section_title,
                 "chunk_index": c.chunk_index,
-                "parent_chunk_id": getattr(c, "parent_chunk_id", ""),
+                "parent_chunk_id": c.parent_chunk_id,
                 "source": c.metadata.get("source", ""),
             }
             for c in chunks
         ]
 
-        # Insert in batches to avoid Chroma's gRPC message-size limit
         total = len(chunks)
         for start in range(0, total, batch_size):
             end = min(start + batch_size, total)
-            self._collection.add(
+            self._children.add(
                 ids=ids[start:end],
                 embeddings=embeddings[start:end].tolist(),
                 documents=texts[start:end],
                 metadatas=metadatas[start:end],
             )
-            print(f"  Indexed chunks {start}–{end-1} / {total}")
+            print(f"  Indexed child chunks {start}–{end-1} / {total}")
 
     # ------------------------------------------------------------------
-    # Query
+    # Indexing — parents
+    # ------------------------------------------------------------------
+
+    def add_parents(
+        self,
+        parents: list[ParentChunk],
+        batch_size: int = 500,
+    ) -> None:
+        """
+        Store parent chunks in the parents collection (text + metadata, no vectors).
+
+        Uses upsert so re-ingestion of the same document is idempotent.
+        """
+        ids = [p.chunk_id for p in parents]
+        texts = [p.text for p in parents]
+        metadatas = [
+            {
+                "document": p.document,
+                "page_number": p.page_number,
+                "section_title": p.section_title,
+                "chunk_index": p.chunk_index,
+            }
+            for p in parents
+        ]
+
+        total = len(parents)
+        for start in range(0, total, batch_size):
+            end = min(start + batch_size, total)
+            # ChromaDB requires embeddings even for non-vector collections.
+            # We pass a trivial [0.0] placeholder — this collection is never
+            # searched by vector, only fetched by ID.
+            dummy_embeddings = [[0.0]] * (end - start)
+            self._parents.upsert(
+                ids=ids[start:end],
+                embeddings=dummy_embeddings,
+                documents=texts[start:end],
+                metadatas=metadatas[start:end],
+            )
+            print(f"  Stored parent chunks {start}–{end-1} / {total}")
+
+        print(f"Parent store: {self._parents.count()} total parents in ChromaDB")
+
+    # ------------------------------------------------------------------
+    # Query — children (vector search)
     # ------------------------------------------------------------------
 
     def search(
@@ -217,42 +212,32 @@ class LegalVectorStore:
         where: Optional[dict] = None,
     ) -> list[VectorSearchResult]:
         """
-        Search for the top-K most similar chunks.
-
-        Args:
-            query_embedding: L2-normalised query vector.
-            top_k:           Number of results to return.
-            where:           Optional Chroma metadata filter
-                             e.g. {"document": {"$eq": "nda_vendor_x.pdf"}}.
-
-        Returns:
-            List of VectorSearchResult sorted by descending similarity.
+        Search for top-K most similar child chunks by cosine similarity.
         """
         kwargs: dict = {
             "query_embeddings": [query_embedding.tolist()],
-            "n_results": min(top_k, self._collection.count() or 1),
+            "n_results": min(top_k, self._children.count() or 1),
             "include": ["documents", "metadatas", "distances"],
         }
         if where:
             kwargs["where"] = where
 
-        results = self._collection.query(**kwargs)
+        results = self._children.query(**kwargs)
 
         output: list[VectorSearchResult] = []
-        ids = results["ids"][0]
-        docs = results["documents"][0]
-        metas = results["metadatas"][0]
-        distances = results["distances"][0]
-
-        for chunk_id, text, meta, dist in zip(ids, docs, metas, distances):
-            similarity = 1.0 - dist    # cosine distance → similarity
+        for chunk_id, text, meta, dist in zip(
+            results["ids"][0],
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0],
+        ):
             output.append(VectorSearchResult(
                 chunk_id=chunk_id,
                 document=meta.get("document", ""),
                 page_number=int(meta.get("page_number", 0)),
                 section_title=meta.get("section_title", ""),
                 text=text,
-                score=float(similarity),
+                score=float(1.0 - dist),   # cosine distance → similarity
                 chunk_index=int(meta.get("chunk_index", 0)),
             ))
 
@@ -260,21 +245,66 @@ class LegalVectorStore:
         return output
 
     # ------------------------------------------------------------------
+    # Fetch — parents (by ID, batch)
+    # ------------------------------------------------------------------
+
+    def get_parents(self, parent_ids: list[str]) -> dict[str, dict]:
+        """
+        Fetch parent chunks by their IDs from the parents collection.
+
+        Returns:
+            Dict mapping parent_chunk_id → {"text": str, "document": str,
+                                             "page_number": int, "section_title": str}
+            Missing IDs are silently omitted (caller should fall back to child text).
+        """
+        if not parent_ids:
+            return {}
+
+        # Deduplicate — multiple children may share the same parent
+        unique_ids = list(dict.fromkeys(parent_ids))
+
+        try:
+            results = self._parents.get(
+                ids=unique_ids,
+                include=["documents", "metadatas"],
+            )
+        except Exception as exc:
+            print(f"  [ParentFetch] Warning: {exc}")
+            return {}
+
+        out: dict[str, dict] = {}
+        for pid, text, meta in zip(
+            results["ids"],
+            results["documents"],
+            results["metadatas"],
+        ):
+            out[pid] = {
+                "text": text,
+                "document": meta.get("document", ""),
+                "page_number": int(meta.get("page_number", 0)),
+                "section_title": meta.get("section_title", ""),
+            }
+        return out
+
+    # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
 
     def count(self) -> int:
-        return self._collection.count()
+        """Number of indexed child chunks."""
+        return self._children.count()
+
+    def parent_count(self) -> int:
+        """Number of stored parent chunks."""
+        return self._parents.count()
 
     def list_documents(self) -> list[str]:
-        """Return unique document names in the store."""
-        results = self._collection.get(include=["metadatas"])
+        """Unique document names in the child collection."""
+        results = self._children.get(include=["metadatas"])
         docs = {m.get("document", "") for m in results["metadatas"]}
         return sorted(docs)
 
-    def get_all_chunks_text(self) -> list[str]:
-        """Return raw text of all chunks (for BM25 index building)."""
-        results = self._collection.get(include=["documents", "metadatas"])
-        # Note: "ids" is always returned by ChromaDB get() automatically —
-        # passing it in include= raises ValueError in chromadb>=0.5
+    def get_all_chunks_text(self) -> tuple[list[str], list[dict], list[str]]:
+        """Return (texts, metadatas, ids) for all child chunks (used by BM25)."""
+        results = self._children.get(include=["documents", "metadatas"])
         return results["documents"], results["metadatas"], results["ids"]
